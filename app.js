@@ -157,7 +157,33 @@ async function decryptByFormat(buf, ext, onProgress) {
   return Formats.decryptNcm(buf, onProgress);
 }
 
-// ---------- ffmpeg 转码引擎（按需加载，多源逐个自动尝试） ----------
+// ---------- ffmpeg 转码引擎（内置同源引擎优先，CDN 兜底） ----------
+async function gunzipToBlobURL(url, type) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(url + ' 加载失败（HTTP ' + res.status + '）');
+  const stream = res.body.pipeThrough(new DecompressionStream('gzip'));
+  const buf = await new Response(stream).arrayBuffer();
+  return URL.createObjectURL(new Blob([buf], { type }));
+}
+
+// 方案一：仓库内置引擎（同源加载，不依赖任何外部 CDN，最可靠）
+async function loadFFmpegLocal() {
+  const { FFmpeg } = await import('./vendor/ffmpeg-esm/index.js');
+  const inst = new FFmpeg();
+  // 注意：不传 classWorkerURL —— 默认按模块自身 URL 解析到同目录的 worker.js（同源可用）。
+  // 旧代码把它打成 blob URL，worker.js 里的相对 import 会整个失效，是个隐患。
+  await withTimeout(
+    inst.load({
+      coreURL: './vendor/core/ffmpeg-core.js',
+      wasmURL: await gunzipToBlobURL('./vendor/core/ffmpeg-core.wasm.gz', 'application/wasm'),
+    }),
+    60000,
+    '内置引擎加载'
+  );
+  return inst;
+}
+
+// 方案二：外部 CDN（内置引擎文件缺失时的兜底）
 async function loadFFmpegFrom(cdn) {
   // 先快速探测（下载核心文件的第 1 字节），5 秒无响应直接换源
   await withTimeout(
@@ -178,7 +204,6 @@ async function loadFFmpegFrom(cdn) {
     instance.load({
       coreURL: await toBlobURL(cdn.file(PKG_CORE[0], PKG_CORE[1], 'dist/umd/ffmpeg-core.js'), 'text/javascript'),
       wasmURL: await toBlobURL(cdn.file(PKG_CORE[0], PKG_CORE[1], 'dist/umd/ffmpeg-core.wasm'), 'application/wasm'),
-      classWorkerURL: await toBlobURL(cdn.file(PKG_FFMPEG[0], PKG_FFMPEG[1], 'dist/esm/worker.js'), 'text/javascript'),
     }),
     90000,
     'ffmpeg 内核加载'
@@ -191,9 +216,18 @@ async function getFFmpeg() {
   if (ffmpegLoading) return ffmpegLoading;
   ffmpegLoading = (async () => {
     const errors = [];
+    try {
+      setStatus('正在加载内置转码引擎（约 10MB，从本站下载，不经外部 CDN）…');
+      const inst = await loadFFmpegLocal();
+      ffmpeg = inst;
+      setStatus('✅ 转码引擎已就绪（内置）。');
+      return inst;
+    } catch (e) {
+      errors.push('内置引擎：' + (e && e.message ? e.message : e));
+    }
     for (const cdn of CDN_CANDIDATES) {
       try {
-        setStatus('正在加载 ffmpeg 转码引擎（约 25MB，源：' + cdn.name + '）…');
+        setStatus('内置引擎不可用，改从 ' + cdn.name + ' 加载 ffmpeg（约 25MB）…');
         const inst = await loadFFmpegFrom(cdn);
         ffmpeg = inst;
         setStatus('✅ 转码引擎已就绪（' + cdn.name + '）。');
