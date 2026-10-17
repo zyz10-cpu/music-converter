@@ -281,6 +281,17 @@ function makeDownloadUrl(data, ext) {
   return URL.createObjectURL(blob);
 }
 
+// 检测网易云「菁彩声」（Audio Vivid / AV3A）沉浸声编码：
+// 编码标记 av3a 位于 moov/stsd 盒内（通常在前 1MB），ffmpeg 无法解码，不能转码。
+// 只有无损及以下音质（标准 FLAC/AAC/MP3）的 NCM 才可转码。
+function isAudioVivid(buf) {
+  const limit = Math.min(buf.length, 1048576);
+  for (let i = 0; i + 4 <= limit; i++) {
+    if (buf[i] === 0x61 && buf[i + 1] === 0x76 && buf[i + 2] === 0x33 && buf[i + 3] === 0x61) return true;
+  }
+  return false;
+}
+
 function triggerDownload(url, filename) {
   const a = document.createElement('a');
   a.href = url;
@@ -352,6 +363,16 @@ async function processFile(file) {
 
     const fmt = formatSel.value;
     const needTranscode = fmt !== 'original' && fmt !== srcExt;
+
+    // 菁彩声（高于无损的音质档位）提前拦截：不白加载转码引擎，直接给出指引
+    const audioVivid = srcExt === 'm4a' && isAudioVivid(audio);
+    if (audioVivid && needTranscode) {
+      throw new Error(
+        '这首歌是网易云「菁彩声」（沉浸声）音质，高于无损档位——只有无损及以下音质的 NCM 才能转码。' +
+        '解决办法：① 网易云客户端 → 设置 → 下载音质 → 改选「无损音质」后重新下载这首歌；' +
+        '或 ② 改用「原始格式」仅解密输出（M4A 完整无损，可在网易云客户端播放）。'
+      );
+    }
     if (needTranscode) {
       statusNode.textContent = '正在准备转码引擎…';
     }
@@ -361,7 +382,8 @@ async function processFile(file) {
 
     metaNode.textContent =
       '已转换 → ' + baseName + '.' + output.ext +
-      '（源格式：' + srcExt.toUpperCase() + (output.transcoded ? '，已转码' : '，仅解密') + '）';
+      '（源格式：' + srcExt.toUpperCase() + (output.transcoded ? '，已转码' : '，仅解密') + '）' +
+      (audioVivid ? ' ⚠️ 菁彩声格式，仅网易云客户端可播放' : '');
 
     const url = makeDownloadUrl(output.data, output.ext);
     const a = document.createElement('a');
