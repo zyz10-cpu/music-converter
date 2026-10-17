@@ -158,12 +158,7 @@ async function processFile(file) {
 
     const fmt = formatSel.value;
     const outputs = [];
-
-    if (fmt === 'auto') {
-      outputs.push({ ext: srcExt, data: audio });
-    } else {
-      outputs.push(await ensureFormat(fmt, srcExt, audio));
-    }
+    outputs.push(await ensureFormat(fmt, srcExt, audio));
 
     metaNode.textContent = '原始格式：' + srcExt.toUpperCase() + ' · ' + (file.size / 1024 / 1024).toFixed(1) + ' MB';
 
