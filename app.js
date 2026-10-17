@@ -158,6 +158,10 @@ async function decryptByFormat(buf, ext, onProgress) {
 }
 
 // ---------- ffmpeg 转码引擎（内置同源引擎优先，CDN 兜底） ----------
+// 站点部署在子路径（/music-converter/）下，且 ffmpeg 内部会按【模块所在目录】解析相对 URL，
+// 所以这里一律用页面地址合成绝对 URL，杜绝路径拼接错误。
+function pageURL(p) { return new URL(p, document.baseURI).href; }
+
 async function gunzipToBlobURL(url, type) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(url + ' 加载失败（HTTP ' + res.status + '）');
@@ -168,14 +172,15 @@ async function gunzipToBlobURL(url, type) {
 
 // 方案一：仓库内置引擎（同源加载，不依赖任何外部 CDN，最可靠）
 async function loadFFmpegLocal() {
-  const { FFmpeg } = await import('./vendor/ffmpeg-esm/index.js');
+  const { FFmpeg } = await import(pageURL('vendor/ffmpeg-esm/index.js'));
   const inst = new FFmpeg();
-  // 注意：不传 classWorkerURL —— 默认按模块自身 URL 解析到同目录的 worker.js（同源可用）。
-  // 旧代码把它打成 blob URL，worker.js 里的相对 import 会整个失效，是个隐患。
+  // classWorkerURL 用仓库根目录的自包含 bundle（无 import），同源构造 Worker 不受限；
+  // 官方 worker.js 含相对 import，跨域/ blob 化都会踩坑。
   await withTimeout(
     inst.load({
-      coreURL: './vendor/core/ffmpeg-core.js',
-      wasmURL: await gunzipToBlobURL('./vendor/core/ffmpeg-core.wasm.gz', 'application/wasm'),
+      classWorkerURL: pageURL('ffmpeg-worker-bundle.js'),
+      coreURL: pageURL('vendor/core/ffmpeg-core.js'),
+      wasmURL: await gunzipToBlobURL(pageURL('vendor/core/ffmpeg-core.wasm.gz'), 'application/wasm'),
     }),
     60000,
     '内置引擎加载'
@@ -202,6 +207,7 @@ async function loadFFmpegFrom(cdn) {
   const instance = new FFmpeg();
   await withTimeout(
     instance.load({
+      classWorkerURL: pageURL('ffmpeg-worker-bundle.js'), // 同源 Worker，绕开跨域构造限制
       coreURL: await toBlobURL(cdn.file(PKG_CORE[0], PKG_CORE[1], 'dist/umd/ffmpeg-core.js'), 'text/javascript'),
       wasmURL: await toBlobURL(cdn.file(PKG_CORE[0], PKG_CORE[1], 'dist/umd/ffmpeg-core.wasm'), 'application/wasm'),
     }),
