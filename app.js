@@ -4,16 +4,29 @@
 
 const KEY_URL = './kugou_key.gz';
 
-// ffmpeg 转码引擎的 CDN 候选源，按顺序自动探测（jsdelivr 在国内经常被墙，必须有备用）
-const CDN_BASES = [
-  'https://fastly.jsdelivr.net/npm',
-  'https://gcore.jsdelivr.net/npm',
-  'https://cdn.jsdelivr.net/npm',
-  'https://unpkg.com',
+// ffmpeg 转码引擎的 CDN 候选源，按顺序自动尝试。
+// npmmirror（阿里国内镜像）放最前：实测 jsdelivr 在国内经常直接连不上。
+const CDN_CANDIDATES = [
+  {
+    name: 'npmmirror 国内镜像',
+    file: (pkg, ver, p) => 'https://registry.npmmirror.com/' + pkg + '/' + ver + '/files/' + p,
+  },
+  {
+    name: 'fastly.jsdelivr',
+    file: (pkg, ver, p) => 'https://fastly.jsdelivr.net/npm/' + pkg + '@' + ver + '/' + p,
+  },
+  {
+    name: 'gcore.jsdelivr',
+    file: (pkg, ver, p) => 'https://gcore.jsdelivr.net/npm/' + pkg + '@' + ver + '/' + p,
+  },
+  {
+    name: 'unpkg',
+    file: (pkg, ver, p) => 'https://unpkg.com/' + pkg + '@' + ver + '/' + p,
+  },
 ];
-const FFMPEG_VER = '@ffmpeg/ffmpeg@0.12.10';
-const FFMPEG_UTIL_VER = '@ffmpeg/util@0.12.1';
-const FFMPEG_CORE_VER = '@ffmpeg/core@0.12.6';
+const PKG_FFMPEG = ['@ffmpeg/ffmpeg', '0.12.10'];
+const PKG_UTIL = ['@ffmpeg/util', '0.12.1'];
+const PKG_CORE = ['@ffmpeg/core', '0.12.6'];
 
 const MIME = { mp3: 'audio/mpeg', flac: 'audio/flac', ogg: 'audio/ogg', wav: 'audio/wav', aac: 'audio/aac', m4a: 'audio/mp4' };
 
@@ -29,7 +42,6 @@ const fileList = document.getElementById('fileList');
 let keyTable = null;
 let ffmpeg = null;
 let ffmpegLoading = null;
-let cdnBasePromise = null;
 
 function setStatus(msg) { statusEl.textContent = msg; }
 
@@ -145,58 +157,52 @@ async function decryptByFormat(buf, ext, onProgress) {
   return Formats.decryptNcm(buf, onProgress);
 }
 
-// ---------- ffmpeg 转码引擎（按需加载，多 CDN 自动切换） ----------
-async function pickCDN() {
-  if (!cdnBasePromise) {
-    cdnBasePromise = (async () => {
-      for (const base of CDN_BASES) {
-        try {
-          const res = await withTimeout(
-            fetch(base + '/' + FFMPEG_CORE_VER + '/package.json', { method: 'HEAD' }),
-            8000,
-            'CDN 探测'
-          );
-          if (res.ok) return base;
-        } catch (e) {
-          // 当前源不可达，试下一个
-        }
-      }
-      throw new Error('所有 CDN 均无法访问，请检查网络');
-    })();
-    cdnBasePromise.catch(() => { cdnBasePromise = null; });
-  }
-  return cdnBasePromise;
+// ---------- ffmpeg 转码引擎（按需加载，多源逐个自动尝试） ----------
+async function loadFFmpegFrom(cdn) {
+  // 先快速探测（下载核心文件的第 1 字节），5 秒无响应直接换源
+  await withTimeout(
+    fetch(cdn.file(PKG_CORE[0], PKG_CORE[1], 'dist/umd/ffmpeg-core.js'), { headers: { Range: 'bytes=0-0' } }),
+    5000,
+    'CDN 探测'
+  );
+  const [{ FFmpeg }, { toBlobURL }] = await withTimeout(
+    Promise.all([
+      import(cdn.file(PKG_FFMPEG[0], PKG_FFMPEG[1], 'dist/esm/index.js')),
+      import(cdn.file(PKG_UTIL[0], PKG_UTIL[1], 'dist/esm/index.js')),
+    ]),
+    30000,
+    'ffmpeg 模块加载'
+  );
+  const instance = new FFmpeg();
+  await withTimeout(
+    instance.load({
+      coreURL: await toBlobURL(cdn.file(PKG_CORE[0], PKG_CORE[1], 'dist/umd/ffmpeg-core.js'), 'text/javascript'),
+      wasmURL: await toBlobURL(cdn.file(PKG_CORE[0], PKG_CORE[1], 'dist/umd/ffmpeg-core.wasm'), 'application/wasm'),
+      classWorkerURL: await toBlobURL(cdn.file(PKG_FFMPEG[0], PKG_FFMPEG[1], 'dist/esm/worker.js'), 'text/javascript'),
+    }),
+    90000,
+    'ffmpeg 内核加载'
+  );
+  return instance;
 }
 
 async function getFFmpeg() {
   if (ffmpeg) return ffmpeg;
   if (ffmpegLoading) return ffmpegLoading;
   ffmpegLoading = (async () => {
-    setStatus('正在选择可用的转码引擎源…');
-    const base = await pickCDN();
-    setStatus('正在加载 ffmpeg 转码引擎（约 25MB，仅转码时需要，源：' + base + '）…');
-    const [{ FFmpeg }, { toBlobURL }] = await withTimeout(
-      Promise.all([
-        import(base + '/' + FFMPEG_VER + '/dist/esm/index.js'),
-        import(base + '/' + FFMPEG_UTIL_VER + '/dist/esm/index.js'),
-      ]),
-      60000,
-      'ffmpeg 模块加载'
-    );
-    const instance = new FFmpeg();
-    const coreBase = base + '/' + FFMPEG_CORE_VER + '/dist/umd';
-    await withTimeout(
-      instance.load({
-        coreURL: await toBlobURL(coreBase + '/ffmpeg-core.js', 'text/javascript'),
-        wasmURL: await toBlobURL(coreBase + '/ffmpeg-core.wasm', 'application/wasm'),
-        classWorkerURL: await toBlobURL(base + '/' + FFMPEG_VER + '/dist/esm/worker.js', 'text/javascript'),
-      }),
-      120000,
-      'ffmpeg 内核加载'
-    );
-    ffmpeg = instance;
-    setStatus('✅ 转码引擎已就绪。');
-    return instance;
+    const errors = [];
+    for (const cdn of CDN_CANDIDATES) {
+      try {
+        setStatus('正在加载 ffmpeg 转码引擎（约 25MB，源：' + cdn.name + '）…');
+        const inst = await loadFFmpegFrom(cdn);
+        ffmpeg = inst;
+        setStatus('✅ 转码引擎已就绪（' + cdn.name + '）。');
+        return inst;
+      } catch (e) {
+        errors.push(cdn.name + '：' + (e && e.message ? e.message : e));
+      }
+    }
+    throw new Error('所有源均加载失败（' + errors.join('；') + '）');
   })();
   try {
     return await ffmpegLoading;
@@ -223,24 +229,36 @@ function triggerDownload(url, filename) {
   a.remove();
 }
 
-async function ensureFormat(target, srcExt, audio) {
+async function ensureFormat(target, srcExt, audio, onProgress) {
   // 「原始格式」或与源格式相同时，直接输出解密结果，不需要 ffmpeg
   if (target === 'original' || target === srcExt) return { ext: srcExt, data: audio, transcoded: false };
   const inst = await getFFmpeg();
-  const inName = 'in.' + srcExt;
-  const outName = 'out.' + target;
-  await inst.writeFile(inName, audio);
-  const args = ['-i', inName, '-vn', '-y'];
-  if (target === 'mp3') args.push('-c:a', 'libmp3lame', '-b:a', bitrateSel.value + 'k');
-  else if (target === 'flac') args.push('-c:a', 'flac');
-  else if (target === 'wav') args.push('-c:a', 'pcm_s16le');
-  else if (target === 'aac') args.push('-c:a', 'aac', '-b:a', bitrateSel.value + 'k');
-  args.push(outName);
-  await inst.exec(args);
-  const data = await inst.readFile(outName);
-  await inst.deleteFile(inName).catch(() => {});
-  await inst.deleteFile(outName).catch(() => {});
-  return { ext: target, data: new Uint8Array(data), transcoded: true };
+  const progressHandler = (ev) => {
+    if (onProgress && ev && typeof ev.progress === 'number' && ev.progress >= 0) {
+      onProgress(Math.min(ev.progress, 1));
+    }
+  };
+  inst.on('progress', progressHandler);
+  try {
+    const inName = 'in.' + srcExt;
+    const outName = 'out.' + target;
+    await inst.writeFile(inName, audio);
+    const args = ['-i', inName, '-vn', '-y'];
+    if (target === 'mp3') args.push('-c:a', 'libmp3lame', '-b:a', bitrateSel.value + 'k');
+    else if (target === 'flac') args.push('-c:a', 'flac');
+    else if (target === 'wav') args.push('-c:a', 'pcm_s16le');
+    else if (target === 'aac') args.push('-c:a', 'aac', '-b:a', bitrateSel.value + 'k');
+    args.push(outName);
+    const ret = await inst.exec(args);
+    if (ret !== 0) throw new Error('ffmpeg 转码失败（返回码 ' + ret + '）');
+    const data = await inst.readFile(outName);
+    await inst.deleteFile(inName).catch(() => {});
+    await inst.deleteFile(outName).catch(() => {});
+    if (onProgress) onProgress(1);
+    return { ext: target, data: new Uint8Array(data), transcoded: true };
+  } finally {
+    inst.off('progress', progressHandler);
+  }
 }
 
 // ---------- 单文件处理 ----------
@@ -272,9 +290,11 @@ async function processFile(file) {
     const fmt = formatSel.value;
     const needTranscode = fmt !== 'original' && fmt !== srcExt;
     if (needTranscode) {
-      statusNode.textContent = '正在转码（首次需联网加载 ffmpeg 引擎，约 25MB）…';
+      statusNode.textContent = '正在准备转码引擎…';
     }
-    const output = await ensureFormat(fmt, srcExt, audio);
+    const output = await ensureFormat(fmt, srcExt, audio, (p) => {
+      statusNode.textContent = '正在转码… ' + Math.round(p * 100) + '%';
+    });
 
     metaNode.textContent =
       '已转换 → ' + baseName + '.' + output.ext +
@@ -339,6 +359,10 @@ function syncBitrateVisibility() {
   bitrateField.style.display = formatSel.value === 'mp3' || formatSel.value === 'aac' ? '' : 'none';
 }
 formatSel.addEventListener('change', syncBitrateVisibility);
+// 选了需要转码的格式后立刻后台预载 ffmpeg 引擎，拖文件时引擎已就绪，感知零等待
+formatSel.addEventListener('change', () => {
+  if (formatSel.value !== 'original') getFFmpeg().catch(() => {});
+});
 syncBitrateVisibility();
 
 // ---------- 启动 ----------
