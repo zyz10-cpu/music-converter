@@ -82,6 +82,9 @@ function sniffFormat(buf) {
     if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46) return 'wav'; // "RIFF"
     if (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) return 'mp3'; // "ID3"
   }
+  if (b.length >= 8) {
+    if (b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) return 'm4a'; // "ftyp"（MP4/M4A）
+  }
   if (b.length >= 2) {
     if (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) return 'mp3'; // MPEG 帧同步
     if (b[0] === 0xff && (b[1] & 0xf6) === 0xf0) return 'aac'; // ADTS

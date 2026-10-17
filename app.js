@@ -1,12 +1,12 @@
 // 主逻辑：UI 交互 + 解密 + 转码编排
 // 解密函数 isKgm/decrypt/sniffFormat 来自 kgm.js（通过 <script> 先加载，全局共享）
 
-const KEY_URL = './kugou_key.gz';
+const KEY_URL = './kugou_key.lzma';
 const FFMPEG_FFMPEG_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
 const FFMPEG_UTIL_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js';
 const FFMPEG_CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
 
-const MIME = { mp3: 'audio/mpeg', flac: 'audio/flac', ogg: 'audio/ogg', wav: 'audio/wav', aac: 'audio/aac' };
+const MIME = { mp3: 'audio/mpeg', flac: 'audio/flac', ogg: 'audio/ogg', wav: 'audio/wav', aac: 'audio/aac', m4a: 'audio/mp4' };
 
 const statusEl = document.getElementById('status');
 const dropZone = document.getElementById('dropZone');
@@ -28,26 +28,29 @@ function escapeHtml(s) {
 }
 
 async function loadKeyTable() {
-  setStatus('正在加载解密密钥表…');
-  if (typeof DecompressionStream === 'undefined') {
-    throw new Error('当前浏览器不支持 DecompressionStream，请升级到较新版本浏览器');
+  setStatus('正在加载解密密钥表（约 94KB）…');
+  if (typeof LZMA === 'undefined' || typeof LZMA.decompress !== 'function') {
+    throw new Error('lzma 解压库未加载');
   }
-  let gzBytes;
+  let lzmaBytes;
   if (typeof window.__KGM_KEY_B64__ === 'string' && window.__KGM_KEY_B64__.length > 0) {
-    // 单文件版：使用内嵌的 base64 密钥表
+    // 单文件版：使用内嵌的 base64 密钥表（.lzma）
     const bin = atob(window.__KGM_KEY_B64__);
-    gzBytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) gzBytes[i] = bin.charCodeAt(i);
+    lzmaBytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) lzmaBytes[i] = bin.charCodeAt(i);
   } else {
     const res = await fetch(KEY_URL);
     if (!res.ok) {
       throw new Error('密钥表加载失败（HTTP ' + res.status + '）。请通过 HTTP 方式访问，或使用单文件版。');
     }
-    gzBytes = new Uint8Array(await res.arrayBuffer());
+    lzmaBytes = new Uint8Array(await res.arrayBuffer());
   }
-  const stream = new Blob([gzBytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-  const buf = await new Response(stream).arrayBuffer();
-  keyTable = new Uint8Array(buf);
+  keyTable = await new Promise((resolve, reject) => {
+    LZMA.decompress(lzmaBytes, (result, error) => {
+      if (error) reject(new Error('密钥表解压失败：' + error));
+      else resolve(new Uint8Array(result));
+    });
+  });
   setStatus('✅ 密钥表已就绪，可以拖入文件开始转换。');
   return keyTable;
 }
