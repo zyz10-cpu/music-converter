@@ -85,6 +85,7 @@ async function getFFmpeg() {
     await instance.load({
       coreURL: await toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.js`, 'text/javascript'),
       wasmURL: await toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
+      classWorker: false,
     });
     ffmpeg = instance;
     return instance;
@@ -157,10 +158,14 @@ async function processFile(file) {
     const baseName = file.name.replace(/\.[^.]+$/, '');
 
     const fmt = formatSel.value;
+    if (fmt !== srcExt) {
+      statusNode.textContent = '正在转码（首次需联网加载 ffmpeg 引擎，约 25MB，请耐心等待）…';
+      await new Promise((r) => setTimeout(r, 0));
+    }
     const outputs = [];
     outputs.push(await ensureFormat(fmt, srcExt, audio));
 
-    metaNode.textContent = '原始格式：' + srcExt.toUpperCase() + ' · ' + (file.size / 1024 / 1024).toFixed(1) + ' MB';
+    metaNode.textContent = '已转换 → ' + baseName + '.' + fmt + '（源格式：' + srcExt.toUpperCase() + '）';
 
     // 生成下载链接并自动触发下载（浏览器若拦截，仍可手动点击）
     for (let i = 0; i < outputs.length; i++) {
