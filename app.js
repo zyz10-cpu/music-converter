@@ -1,11 +1,11 @@
-// 主逻辑：UI 交互 + 解密编排（Web Worker）+ 转码编排
+// 主逻辑：UI 交互 + 解密编排（Web Worker）+ 转码编排（直连 ffmpeg Worker）
 // 解密函数 isKgm/decrypt/sniffFormat 来自 kgm.js，Formats.decryptNcm 来自 formats.js
-// 重活在 decrypt-worker.js（后台线程）里跑，主线程只刷进度，界面不卡死。
+// 转码不走 ffmpeg 官方封装层（classes.js 那套模块链太脆），
+// 而是自己实现精简客户端，直接与 ffmpeg-worker-bundle.js 通信。
 
 const KEY_URL = './kugou_key.gz';
 
-// ffmpeg 转码引擎的 CDN 候选源，按顺序自动尝试。
-// npmmirror（阿里国内镜像）放最前：实测 jsdelivr 在国内经常直接连不上。
+// ffmpeg 核心库的 CDN 候选源（仅内置引擎缺失时兜底；经典 Worker 的 importScripts 不受跨域限制）
 const CDN_CANDIDATES = [
   {
     name: 'npmmirror 国内镜像',
@@ -24,8 +24,6 @@ const CDN_CANDIDATES = [
     file: (pkg, ver, p) => 'https://unpkg.com/' + pkg + '@' + ver + '/' + p,
   },
 ];
-const PKG_FFMPEG = ['@ffmpeg/ffmpeg', '0.12.10'];
-const PKG_UTIL = ['@ffmpeg/util', '0.12.1'];
 const PKG_CORE = ['@ffmpeg/core', '0.12.6'];
 
 const MIME = { mp3: 'audio/mpeg', flac: 'audio/flac', ogg: 'audio/ogg', wav: 'audio/wav', aac: 'audio/aac', m4a: 'audio/mp4' };
@@ -55,6 +53,9 @@ function withTimeout(promise, ms, label) {
     new Promise((_, rej) => setTimeout(() => rej(new Error(label + '超时（' + Math.round(ms / 1000) + ' 秒）')), ms)),
   ]);
 }
+
+// 站点部署在子路径（/music-converter/）下，一律用页面地址合成绝对 URL，杜绝路径拼接错误。
+function pageURL(p) { return new URL(p, document.baseURI).href; }
 
 async function loadKeyTable() {
   setStatus('正在加载解密密钥表（12MB，首次较慢，之后走缓存）…');
@@ -157,64 +158,65 @@ async function decryptByFormat(buf, ext, onProgress) {
   return Formats.decryptNcm(buf, onProgress);
 }
 
-// ---------- ffmpeg 转码引擎（内置同源引擎优先，CDN 兜底） ----------
-// 站点部署在子路径（/music-converter/）下，且 ffmpeg 内部会按【模块所在目录】解析相对 URL，
-// 所以这里一律用页面地址合成绝对 URL，杜绝路径拼接错误。
-function pageURL(p) { return new URL(p, document.baseURI).href; }
-
-async function gunzipToBlobURL(url, type) {
+// ---------- ffmpeg 转码引擎（精简客户端，直连 Worker，无官方封装层） ----------
+async function gunzipToBlobURL(url, type, onProgress) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(url + ' 加载失败（HTTP ' + res.status + '）');
-  const stream = res.body.pipeThrough(new DecompressionStream('gzip'));
+  const total = parseInt(res.headers.get('content-length') || '0', 10);
+  const reader = res.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    if (onProgress && total > 0) onProgress(received / total);
+  }
+  const stream = new Blob(chunks).stream().pipeThrough(new DecompressionStream('gzip'));
   const buf = await new Response(stream).arrayBuffer();
   return URL.createObjectURL(new Blob([buf], { type }));
 }
 
-// 方案一：仓库内置引擎（同源加载，不依赖任何外部 CDN，最可靠）
-async function loadFFmpegLocal() {
-  const { FFmpeg } = await import(pageURL('vendor/ffmpeg-esm/index.js'));
-  const inst = new FFmpeg();
-  // classWorkerURL 用仓库根目录的自包含 bundle（无 import），同源构造 Worker 不受限；
-  // 官方 worker.js 含相对 import，跨域/ blob 化都会踩坑。
-  await withTimeout(
-    inst.load({
-      classWorkerURL: pageURL('ffmpeg-worker-bundle.js'),
-      coreURL: pageURL('vendor/core/ffmpeg-core.js'),
-      wasmURL: await gunzipToBlobURL(pageURL('vendor/core/ffmpeg-core.wasm.gz'), 'application/wasm'),
-    }),
-    60000,
-    '内置引擎加载'
-  );
-  return inst;
-}
-
-// 方案二：外部 CDN（内置引擎文件缺失时的兜底）
-async function loadFFmpegFrom(cdn) {
-  // 先快速探测（下载核心文件的第 1 字节），5 秒无响应直接换源
-  await withTimeout(
-    fetch(cdn.file(PKG_CORE[0], PKG_CORE[1], 'dist/umd/ffmpeg-core.js'), { headers: { Range: 'bytes=0-0' } }),
-    5000,
-    'CDN 探测'
-  );
-  const [{ FFmpeg }, { toBlobURL }] = await withTimeout(
-    Promise.all([
-      import(cdn.file(PKG_FFMPEG[0], PKG_FFMPEG[1], 'dist/esm/index.js')),
-      import(cdn.file(PKG_UTIL[0], PKG_UTIL[1], 'dist/esm/index.js')),
-    ]),
-    30000,
-    'ffmpeg 模块加载'
-  );
-  const instance = new FFmpeg();
-  await withTimeout(
-    instance.load({
-      classWorkerURL: pageURL('ffmpeg-worker-bundle.js'), // 同源 Worker，绕开跨域构造限制
-      coreURL: await toBlobURL(cdn.file(PKG_CORE[0], PKG_CORE[1], 'dist/umd/ffmpeg-core.js'), 'text/javascript'),
-      wasmURL: await toBlobURL(cdn.file(PKG_CORE[0], PKG_CORE[1], 'dist/umd/ffmpeg-core.wasm'), 'application/wasm'),
-    }),
-    90000,
-    'ffmpeg 内核加载'
-  );
-  return instance;
+// 精简 ffmpeg 客户端：与 ffmpeg-worker-bundle.js 直接约定 {id, type, data} 协议。
+// 经典 Worker 的 importScripts 可以加载 UMD 版核心库并挂全局变量（模块 Worker 做不到），
+// 且 importScripts 跨域不需要 CORS —— CDN 兜底因此也可靠。
+function createCoreClient() {
+  const worker = new Worker(pageURL('ffmpeg-worker-bundle.js'));
+  const client = {
+    worker,
+    seq: 0,
+    pending: new Map(),
+    onProgress: null,
+    call(type, data) {
+      return new Promise((resolve, reject) => {
+        const id = ++client.seq;
+        client.pending.set(id, { resolve, reject });
+        worker.postMessage({ id, type, data });
+      });
+    },
+  };
+  worker.onmessage = (e) => {
+    const { id, type, data } = e.data || {};
+    if (type === 'PROGRESS') {
+      const p = data && typeof data.progress === 'number' ? data.progress
+        : data && typeof data.ratio === 'number' ? data.ratio : null;
+      if (p !== null && client.onProgress) client.onProgress(Math.min(Math.max(p, 0), 1));
+      return;
+    }
+    if (type === 'LOG') return;
+    const pending = client.pending.get(id);
+    if (!pending) return;
+    client.pending.delete(id);
+    if (type === 'ERROR') pending.reject(new Error(String(data)));
+    else pending.resolve(data);
+  };
+  worker.onerror = (e) => {
+    const err = new Error('ffmpeg Worker 异常：' + (e.message || '未知错误'));
+    for (const p of client.pending.values()) p.reject(err);
+    client.pending.clear();
+  };
+  return client;
 }
 
 async function getFFmpeg() {
@@ -222,22 +224,35 @@ async function getFFmpeg() {
   if (ffmpegLoading) return ffmpegLoading;
   ffmpegLoading = (async () => {
     const errors = [];
+    // 方案一：内置引擎（核心库 114KB + wasm 10MB 全部从本站同源加载）
     try {
-      setStatus('正在加载内置转码引擎（约 10MB，从本站下载，不经外部 CDN）…');
-      const inst = await loadFFmpegLocal();
-      ffmpeg = inst;
+      const client = createCoreClient();
+      const wasmURL = await gunzipToBlobURL(
+        pageURL('vendor/core/ffmpeg-core.wasm.gz'),
+        'application/wasm',
+        (p) => setStatus('正在加载内置转码引擎（从本站下载）… ' + Math.round(p * 100) + '%')
+      );
+      await withTimeout(
+        client.call('LOAD', { coreURL: pageURL('vendor/core/ffmpeg-core.js'), wasmURL }),
+        60000,
+        '内置引擎初始化'
+      );
+      ffmpeg = client;
       setStatus('✅ 转码引擎已就绪（内置）。');
-      return inst;
+      return client;
     } catch (e) {
       errors.push('内置引擎：' + (e && e.message ? e.message : e));
     }
+    // 方案二：CDN（importScripts 跨域直取核心库；wasm 地址按核心库路径推导，由引擎内部下载）
     for (const cdn of CDN_CANDIDATES) {
       try {
         setStatus('内置引擎不可用，改从 ' + cdn.name + ' 加载 ffmpeg（约 25MB）…');
-        const inst = await loadFFmpegFrom(cdn);
-        ffmpeg = inst;
+        const coreJs = cdn.file(PKG_CORE[0], PKG_CORE[1], 'dist/umd/ffmpeg-core.js');
+        const client = createCoreClient();
+        await withTimeout(client.call('LOAD', { coreURL: coreJs }), 60000, cdn.name + ' 引擎加载');
+        ffmpeg = client;
         setStatus('✅ 转码引擎已就绪（' + cdn.name + '）。');
-        return inst;
+        return client;
       } catch (e) {
         errors.push(cdn.name + '：' + (e && e.message ? e.message : e));
       }
@@ -273,32 +288,23 @@ async function ensureFormat(target, srcExt, audio, onProgress) {
   // 「原始格式」或与源格式相同时，直接输出解密结果，不需要 ffmpeg
   if (target === 'original' || target === srcExt) return { ext: srcExt, data: audio, transcoded: false };
   const inst = await getFFmpeg();
-  const progressHandler = (ev) => {
-    if (onProgress && ev && typeof ev.progress === 'number' && ev.progress >= 0) {
-      onProgress(Math.min(ev.progress, 1));
-    }
-  };
-  inst.on('progress', progressHandler);
-  try {
-    const inName = 'in.' + srcExt;
-    const outName = 'out.' + target;
-    await inst.writeFile(inName, audio);
-    const args = ['-i', inName, '-vn', '-y'];
-    if (target === 'mp3') args.push('-c:a', 'libmp3lame', '-b:a', bitrateSel.value + 'k');
-    else if (target === 'flac') args.push('-c:a', 'flac');
-    else if (target === 'wav') args.push('-c:a', 'pcm_s16le');
-    else if (target === 'aac') args.push('-c:a', 'aac', '-b:a', bitrateSel.value + 'k');
-    args.push(outName);
-    const ret = await inst.exec(args);
-    if (ret !== 0) throw new Error('ffmpeg 转码失败（返回码 ' + ret + '）');
-    const data = await inst.readFile(outName);
-    await inst.deleteFile(inName).catch(() => {});
-    await inst.deleteFile(outName).catch(() => {});
-    if (onProgress) onProgress(1);
-    return { ext: target, data: new Uint8Array(data), transcoded: true };
-  } finally {
-    inst.off('progress', progressHandler);
-  }
+  inst.onProgress = onProgress || null;
+  const inName = 'in.' + srcExt;
+  const outName = 'out.' + target;
+  await inst.call('WRITE_FILE', { path: inName, data: audio });
+  const args = ['-i', inName, '-vn', '-y'];
+  if (target === 'mp3') args.push('-c:a', 'libmp3lame', '-b:a', bitrateSel.value + 'k');
+  else if (target === 'flac') args.push('-c:a', 'flac');
+  else if (target === 'wav') args.push('-c:a', 'pcm_s16le');
+  else if (target === 'aac') args.push('-c:a', 'aac', '-b:a', bitrateSel.value + 'k');
+  args.push(outName);
+  const ret = await inst.call('EXEC', { args, timeout: -1 });
+  if (ret !== 0) throw new Error('ffmpeg 转码失败（返回码 ' + ret + '）');
+  const data = await inst.call('READ_FILE', { path: outName, encoding: 'binary' });
+  await inst.call('DELETE_FILE', { path: inName }).catch(() => {});
+  await inst.call('DELETE_FILE', { path: outName }).catch(() => {});
+  if (onProgress) onProgress(1);
+  return { ext: target, data: new Uint8Array(data), transcoded: true };
 }
 
 // ---------- 单文件处理 ----------
