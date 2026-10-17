@@ -30,16 +30,22 @@
 
   // ---------- AES-128-ECB（用 Web Crypto 的 CBC 模拟 ECB：每个块 IV=0 独立解密） ----------
   async function aesEcbDecrypt(keyBytes, data) {
+    if (!window.crypto || !window.crypto.subtle) {
+      throw new Error('当前环境不支持 Web Crypto。解密 .ncm 需要 HTTPS（如 GitHub Pages 链接）或 localhost，直接用 file:// 双击打开会失败');
+    }
+    // 补齐到 16 字节的倍数（正常文件本就是 16 的倍数，这里仅作防御）
+    const paddedLen = Math.ceil(data.length / 16) * 16;
+    const padded = new Uint8Array(paddedLen);
+    padded.set(data);
     const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
     const iv = new Uint8Array(16);
-    const n = data.length / 16;
-    const out = new Uint8Array(data.length);
-    for (let i = 0; i < n; i++) {
+    const out = new Uint8Array(paddedLen);
+    for (let i = 0; i < paddedLen / 16; i++) {
       const dec = new Uint8Array(await crypto.subtle.decrypt(
-        { name: 'AES-CBC', iv }, key, data.subarray(i * 16, i * 16 + 16)));
+        { name: 'AES-CBC', iv }, key, padded.subarray(i * 16, i * 16 + 16)));
       out.set(dec, i * 16);
     }
-    return out;
+    return out.subarray(0, data.length);
   }
 
   // ---------- RC4（NCM 用） ----------
@@ -77,8 +83,12 @@
   }
 
   async function decryptNcm(buf) {
+    if (!isNcm(buf)) throw new Error('不是有效的 NCM 文件（文件头魔数不匹配）');
     let pos = 10; // 魔数(8) + gap(2)
     const keyLen = readU32(buf, pos); pos += 4;
+    if (keyLen <= 0 || keyLen > 0x100000 || pos + keyLen > buf.length) {
+      throw new Error('NCM 密钥块长度异常（keyLen=' + keyLen + '，文件大小=' + buf.length + '）');
+    }
     const keyData = buf.subarray(pos, pos + keyLen); pos += keyLen;
 
     const xored = new Uint8Array(keyLen);
