@@ -66,15 +66,10 @@ async function decryptByFormat(buf, ext) {
     return decrypt(buf, kt);
   }
   if (ext === '.ncm') return await Formats.decryptNcm(buf);
-  if (ext === '.kwm') return Formats.decryptKwm(buf);
-  if (ext === '.xm') return Formats.decryptXm(buf);
-  if (Formats.isQmc(ext)) return Formats.decryptQmc(buf);
   // 兜底：按魔数识别
   if (isKgm(buf)) return decrypt(buf, await getKeyTable());
   if (Formats.isNcm(buf)) return await Formats.decryptNcm(buf);
-  if (Formats.isKwm(buf)) return Formats.decryptKwm(buf);
-  if (Formats.isXm(buf)) return Formats.decryptXm(buf);
-  throw new Error('无法识别的加密格式（支持 kgm/kgma/ncm/kwm/xm/qmc/mflac/mgg）');
+  throw new Error('无法识别的加密格式（支持 kgm/kgma/ncm）');
 }
 
 async function getFFmpeg() {
@@ -153,8 +148,9 @@ async function processFile(file) {
   try {
     const buf = new Uint8Array(await file.arrayBuffer());
     const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+    const isKgmFmt = ext === '.kgm' || ext === '.kgma' || ext === '.vpr';
 
-    statusNode.textContent = '正在解密…';
+    statusNode.textContent = isKgmFmt ? '正在加载解密密钥表（12MB，首次较慢，之后走缓存）…' : '正在解密…';
     await new Promise((r) => setTimeout(r, 0)); // 让状态文字有机会渲染
     const audio = await decryptByFormat(buf, ext);
     const srcExt = sniffFormat(audio);
@@ -239,4 +235,6 @@ formatSel.addEventListener('change', syncBitrateVisibility);
 syncBitrateVisibility();
 
 // ---------- 启动 ----------
-setStatus('就绪。拖入 .kgm/.kgma/.ncm/.kwm/.xm/.qmc/.mflac/.mgg 文件开始转换。');
+setStatus('就绪。拖入 .kgm/.kgma/.ncm 文件开始转换。');
+// 后台预加载酷狗解密密钥表，加速后续酷狗文件转换
+getKeyTable().catch(() => {});

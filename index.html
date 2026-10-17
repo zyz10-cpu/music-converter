@@ -10,14 +10,14 @@
   <main class="app">
     <header>
       <h1>🎵 加密音乐转换器</h1>
-      <p class="subtitle">本地解密 · 文件不出浏览器 · 支持 kgm/kgma/ncm/kwm/xm/qmc/mflac/mgg</p>
+      <p class="subtitle">本地解密 · 文件不出浏览器 · 支持酷狗 kgm/kgma · 网易云 ncm</p>
     </header>
 
     <div id="dropZone" class="drop-zone" tabindex="0">
       <div class="drop-icon">📁</div>
-      <p>拖拽加密音乐文件到这里（酷狗 / 网易云 / QQ音乐 / 酷我 / 虾米）</p>
+      <p>拖拽酷狗 .kgm/.kgma 或网易云 .ncm 文件到这里</p>
       <button id="pickBtn" class="btn" type="button">选择文件</button>
-      <input type="file" id="fileInput" accept=".kgm,.kgma,.vpr,.ncm,.kwm,.xm,.qmc0,.qmc3,.qmcflac,.qmcogg,.mflac,.mgg" multiple hidden />
+      <input type="file" id="fileInput" accept=".kgm,.kgma,.vpr,.ncm" multiple hidden />
     </div>
 
     <section class="options">

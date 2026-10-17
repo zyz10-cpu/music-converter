@@ -62,11 +62,9 @@ function decrypt(buf, keyTable) {
   const mend = PUB_KEY_MEND;
 
   for (let i = 0; i < audioLen; i++) {
-    let med8 = ownKey[i % 17] ^ src[i];
-    med8 ^= (med8 & 0x0f) << 4;
-    let msk8 = mend[i % 272] ^ keyTable[i >> 4];
-    msk8 ^= (msk8 & 0x0f) << 4;
-    out[i] = med8 ^ msk8;
+    const med = ownKey[i % 17] ^ src[i];
+    const msk = mend[i % 272] ^ keyTable[i >> 4];
+    out[i] = (med ^ ((med & 0x0f) << 4)) ^ (msk ^ ((msk & 0x0f) << 4));
   }
   return out;
 }
