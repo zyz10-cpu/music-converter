@@ -188,6 +188,7 @@ function createCoreClient() {
     seq: 0,
     pending: new Map(),
     onProgress: null,
+    logs: [],
     call(type, data) {
       return new Promise((resolve, reject) => {
         const id = ++client.seq;
@@ -198,13 +199,18 @@ function createCoreClient() {
   };
   worker.onmessage = (e) => {
     const { id, type, data } = e.data || {};
+    if (type === 'LOG') {
+      const msg = typeof data === 'string' ? data : data && data.message ? data.message : JSON.stringify(data);
+      client.logs.push(msg);
+      if (client.logs.length > 200) client.logs.splice(0, client.logs.length - 200);
+      return;
+    }
     if (type === 'PROGRESS') {
       const p = data && typeof data.progress === 'number' ? data.progress
         : data && typeof data.ratio === 'number' ? data.ratio : null;
       if (p !== null && client.onProgress) client.onProgress(Math.min(Math.max(p, 0), 1));
       return;
     }
-    if (type === 'LOG') return;
     const pending = client.pending.get(id);
     if (!pending) return;
     client.pending.delete(id);
@@ -299,7 +305,18 @@ async function ensureFormat(target, srcExt, audio, onProgress) {
   else if (target === 'aac') args.push('-c:a', 'aac', '-b:a', bitrateSel.value + 'k');
   args.push(outName);
   const ret = await inst.call('EXEC', { args, timeout: -1 });
-  if (ret !== 0) throw new Error('ffmpeg 转码失败（返回码 ' + ret + '）');
+  if (ret !== 0) {
+    const logText = (inst.logs || []).join('\n');
+    if (logText.includes('av3a') || logText.includes('unknown codec')) {
+      throw new Error(
+        '这首歌是网易云「菁彩声」（Audio Vivid / AV3A）沉浸声格式，不是普通 AAC——' +
+        'ffmpeg 全系列（含桌面版 7.1 以下）都无法解码它，任何转换工具都转不了。' +
+        '解密出的 M4A 文件本身是完整无损的，请改用「原始格式」输出后在网易云客户端播放。'
+      );
+    }
+    const tailLines = (inst.logs || []).slice(-3).join(' | ');
+    throw new Error('ffmpeg 转码失败（返回码 ' + ret + '）' + (tailLines ? '：' + tailLines : ''));
+  }
   const data = await inst.call('READ_FILE', { path: outName, encoding: 'binary' });
   await inst.call('DELETE_FILE', { path: inName }).catch(() => {});
   await inst.call('DELETE_FILE', { path: outName }).catch(() => {});
