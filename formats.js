@@ -8,21 +8,107 @@
     return (buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)) >>> 0;
   }
 
-  // ---------- AES-128-ECB（用 Web Crypto 的 CBC 模拟 ECB：每块 IV=0 独立解密） ----------
-  async function aesEcbDecrypt(keyBytes, data) {
-    if (!window.crypto || !window.crypto.subtle) {
-      throw new Error('当前环境不支持 Web Crypto。解密 .ncm 需要 HTTPS（如 GitHub Pages 链接）或 localhost');
+  // ---------- 手写 AES-128（纯 JS，与官方测试向量一致，避免 Web Crypto 兼容问题） ----------
+  function gfMul(a, b) {
+    let p = 0;
+    for (let i = 0; i < 8; i++) {
+      if (b & 1) p ^= a;
+      const hi = a & 0x80;
+      a = (a << 1) & 0xff;
+      if (hi) a ^= 0x1b;
+      b >>= 1;
     }
+    return p;
+  }
+
+  function gfPow(a, n) {
+    let r = 1;
+    while (n) {
+      if (n & 1) r = gfMul(r, a);
+      a = gfMul(a, a);
+      n >>= 1;
+    }
+    return r;
+  }
+
+  function rotl8(x, n) { return ((x << n) | (x >> (8 - n))) & 0xff; }
+
+  const AES_SBOX = (() => {
+    const s = new Uint8Array(256);
+    for (let x = 0; x < 256; x++) {
+      const inv = gfPow(x, 254);
+      let v = inv;
+      for (let i = 1; i < 5; i++) v ^= rotl8(inv, i);
+      s[x] = v ^ 0x63;
+    }
+    return s;
+  })();
+
+  const AES_INV_SBOX = (() => {
+    const inv = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) inv[AES_SBOX[i]] = i;
+    return inv;
+  })();
+
+  const AES_RCON = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
+
+  function aesKeyExpansion(key) {
+    const w = [];
+    for (let i = 0; i < 4; i++) w.push([key[i * 4], key[i * 4 + 1], key[i * 4 + 2], key[i * 4 + 3]]);
+    for (let i = 4; i < 44; i++) {
+      let temp = w[i - 1].slice();
+      if (i % 4 === 0) {
+        temp = [temp[1], temp[2], temp[3], temp[0]];
+        temp = temp.map((b) => AES_SBOX[b]);
+        temp[0] ^= AES_RCON[i / 4 - 1];
+      }
+      w.push([w[i - 4][0] ^ temp[0], w[i - 4][1] ^ temp[1], w[i - 4][2] ^ temp[2], w[i - 4][3] ^ temp[3]]);
+    }
+    return w;
+  }
+
+  function aesDecryptBlock(block, w) {
+    let state = Array.from(block);
+    const invShiftRows = (s) => {
+      const ns = new Array(16);
+      for (let r = 0; r < 4; r++)
+        for (let c = 0; c < 4; c++)
+          ns[r + 4 * c] = s[r + 4 * ((c - r + 4) % 4)];
+      return ns;
+    };
+    const invMixColumns = (s) => {
+      const ns = new Array(16);
+      for (let c = 0; c < 4; c++) {
+        const s0 = s[4 * c], s1 = s[4 * c + 1], s2 = s[4 * c + 2], s3 = s[4 * c + 3];
+        ns[4 * c] = gfMul(s0, 14) ^ gfMul(s1, 11) ^ gfMul(s2, 13) ^ gfMul(s3, 9);
+        ns[4 * c + 1] = gfMul(s0, 9) ^ gfMul(s1, 14) ^ gfMul(s2, 11) ^ gfMul(s3, 13);
+        ns[4 * c + 2] = gfMul(s0, 13) ^ gfMul(s1, 9) ^ gfMul(s2, 14) ^ gfMul(s3, 11);
+        ns[4 * c + 3] = gfMul(s0, 11) ^ gfMul(s1, 13) ^ gfMul(s2, 9) ^ gfMul(s3, 14);
+      }
+      return ns;
+    };
+    // 初始 AddRoundKey（第 10 轮）
+    for (let i = 0; i < 16; i++) state[i] ^= w[40 + (i >> 2)][i & 3];
+    for (let rnd = 9; rnd >= 1; rnd--) {
+      state = invShiftRows(state);
+      for (let i = 0; i < 16; i++) state[i] = AES_INV_SBOX[state[i]];
+      for (let i = 0; i < 16; i++) state[i] ^= w[rnd * 4 + (i >> 2)][i & 3];
+      state = invMixColumns(state);
+    }
+    state = invShiftRows(state);
+    for (let i = 0; i < 16; i++) state[i] = AES_INV_SBOX[state[i]];
+    for (let i = 0; i < 16; i++) state[i] ^= w[(i >> 2)][i & 3];
+    return Uint8Array.from(state);
+  }
+
+  function aesEcbDecrypt(keyBytes, data) {
+    const w = aesKeyExpansion(keyBytes);
     const paddedLen = Math.ceil(data.length / 16) * 16;
     const padded = new Uint8Array(paddedLen);
     padded.set(data);
-    const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
-    const iv = new Uint8Array(16);
     const out = new Uint8Array(paddedLen);
     for (let i = 0; i < paddedLen / 16; i++) {
-      const dec = new Uint8Array(await crypto.subtle.decrypt(
-        { name: 'AES-CBC', iv }, key, padded.slice(i * 16, i * 16 + 16)));
-      out.set(dec, i * 16);
+      out.set(aesDecryptBlock(padded.slice(i * 16, i * 16 + 16), w), i * 16);
     }
     return out.subarray(0, data.length);
   }
