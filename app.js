@@ -1,7 +1,7 @@
 // 主逻辑：UI 交互 + 解密 + 转码编排
 // 解密函数 isKgm/decrypt/sniffFormat 来自 kgm.js（通过 <script> 先加载，全局共享）
 
-const KEY_URL = './assets/kugou_key.gz';
+const KEY_URL = './kugou_key.gz';
 const FFMPEG_FFMPEG_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
 const FFMPEG_UTIL_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js';
 const FFMPEG_CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
