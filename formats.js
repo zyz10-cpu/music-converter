@@ -21,7 +21,7 @@
     const out = new Uint8Array(paddedLen);
     for (let i = 0; i < paddedLen / 16; i++) {
       const dec = new Uint8Array(await crypto.subtle.decrypt(
-        { name: 'AES-CBC', iv }, key, padded.subarray(i * 16, i * 16 + 16)));
+        { name: 'AES-CBC', iv }, key, padded.slice(i * 16, i * 16 + 16)));
       out.set(dec, i * 16);
     }
     return out.subarray(0, data.length);
@@ -74,19 +74,27 @@
     // 自动识别是否需要对密钥做 XOR 0x64（兼容不同版本 NCM）
     const NCM_PREFIX = 'neteasecloudmusic';
     let deKey = null;
+    let lastErr = null;
     for (const xor64 of [true, false]) {
       const xored = new Uint8Array(keyLen);
       for (let i = 0; i < keyLen; i++) xored[i] = keyData[i] ^ (xor64 ? 0x64 : 0);
-      let dk = await aesEcbDecrypt(NCM_CORE_KEY, xored);
-      const pad = dk[dk.length - 1];
-      if (pad <= 16) dk = dk.subarray(0, dk.length - pad);
-      if (dk.length >= 17) {
-        let ok = true;
-        for (let i = 0; i < 17; i++) if (dk[i] !== NCM_PREFIX.charCodeAt(i)) { ok = false; break; }
-        if (ok) { deKey = dk; break; }
+      try {
+        let dk = await aesEcbDecrypt(NCM_CORE_KEY, xored);
+        const pad = dk[dk.length - 1];
+        if (pad <= 16) dk = dk.subarray(0, dk.length - pad);
+        if (dk.length >= 17) {
+          let ok = true;
+          for (let i = 0; i < 17; i++) if (dk[i] !== NCM_PREFIX.charCodeAt(i)) { ok = false; break; }
+          if (ok) { deKey = dk; break; }
+        }
+      } catch (e) {
+        lastErr = e;
       }
     }
-    if (!deKey) throw new Error('NCM 密钥解密失败：无法识别密钥头（文件可能损坏或为新版格式）');
+    if (!deKey) {
+      const detail = lastErr && lastErr.message ? lastErr.message : '无法识别密钥头';
+      throw new Error('NCM 密钥解密失败（keyLen=' + keyLen + '，文件大小=' + buf.length + '，错误=' + detail + '）');
+    }
     const boxKey = deKey.subarray(17);
 
     const modLen = readU32(buf, pos); pos += 4 + modLen;
