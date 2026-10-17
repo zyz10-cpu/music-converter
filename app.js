@@ -1,10 +1,19 @@
-// 主逻辑：UI 交互 + 解密 + 转码编排
-// 解密函数 isKgm/decrypt/sniffFormat 来自 kgm.js（通过 <script> 先加载，全局共享）
+// 主逻辑：UI 交互 + 解密编排（Web Worker）+ 转码编排
+// 解密函数 isKgm/decrypt/sniffFormat 来自 kgm.js，Formats.decryptNcm 来自 formats.js
+// 重活在 decrypt-worker.js（后台线程）里跑，主线程只刷进度，界面不卡死。
 
 const KEY_URL = './kugou_key.gz';
-const FFMPEG_FFMPEG_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
-const FFMPEG_UTIL_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js';
-const FFMPEG_CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+
+// ffmpeg 转码引擎的 CDN 候选源，按顺序自动探测（jsdelivr 在国内经常被墙，必须有备用）
+const CDN_BASES = [
+  'https://fastly.jsdelivr.net/npm',
+  'https://gcore.jsdelivr.net/npm',
+  'https://cdn.jsdelivr.net/npm',
+  'https://unpkg.com',
+];
+const FFMPEG_VER = '@ffmpeg/ffmpeg@0.12.10';
+const FFMPEG_UTIL_VER = '@ffmpeg/util@0.12.1';
+const FFMPEG_CORE_VER = '@ffmpeg/core@0.12.6';
 
 const MIME = { mp3: 'audio/mpeg', flac: 'audio/flac', ogg: 'audio/ogg', wav: 'audio/wav', aac: 'audio/aac', m4a: 'audio/mp4' };
 
@@ -20,11 +29,19 @@ const fileList = document.getElementById('fileList');
 let keyTable = null;
 let ffmpeg = null;
 let ffmpegLoading = null;
+let cdnBasePromise = null;
 
 function setStatus(msg) { statusEl.textContent = msg; }
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(label + '超时（' + Math.round(ms / 1000) + ' 秒）')), ms)),
+  ]);
 }
 
 async function loadKeyTable() {
@@ -39,7 +56,7 @@ async function loadKeyTable() {
     gzBytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) gzBytes[i] = bin.charCodeAt(i);
   } else {
-    const res = await fetch(KEY_URL);
+    const res = await withTimeout(fetch(KEY_URL), 60000, '密钥表下载');
     if (!res.ok) {
       throw new Error('密钥表加载失败（HTTP ' + res.status + '）。请通过 HTTP 方式访问，或使用单文件版。');
     }
@@ -64,42 +81,131 @@ async function getKeyTable() {
   return keyTablePromise;
 }
 
-async function decryptByFormat(buf, ext) {
-  if (ext === '.kgm' || ext === '.kgma') {
-    const kt = await getKeyTable();
-    if (!isKgm(buf)) throw new Error('不是有效的 KGM/KGMA 文件（文件头不匹配）');
-    return decrypt(buf, kt);
+// ---------- 解密 Worker ----------
+let decryptWorker = null;
+let workerTaskId = 0;
+let workerHasKey = false;
+
+function getDecryptWorker() {
+  if (decryptWorker === null) {
+    try {
+      decryptWorker = new Worker('./decrypt-worker.js');
+    } catch (e) {
+      decryptWorker = false; // file:// 或单文件版等场景禁用 Worker，回退主线程
+    }
   }
-  if (ext === '.ncm') return await Formats.decryptNcm(buf);
-  // 兜底：按魔数识别
-  if (isKgm(buf)) return decrypt(buf, await getKeyTable());
-  if (Formats.isNcm(buf)) return await Formats.decryptNcm(buf);
-  throw new Error('无法识别的加密格式（支持 kgm/kgma/ncm）');
+  return decryptWorker || null;
+}
+
+function runWorkerTask(worker, msg, transfers, onProgress) {
+  return new Promise((resolve, reject) => {
+    const id = ++workerTaskId;
+    const handler = (e) => {
+      const d = e.data;
+      if (!d || d.id !== id) return;
+      if (typeof d.progress === 'number') {
+        if (onProgress) onProgress(d.progress);
+        return;
+      }
+      worker.removeEventListener('message', handler);
+      if (d.error) reject(new Error(d.error));
+      else resolve(d);
+    };
+    worker.addEventListener('message', handler);
+    worker.postMessage(Object.assign({ id }, msg), transfers);
+  });
+}
+
+async function decryptByFormat(buf, ext, onProgress) {
+  const kgmByMagic = isKgm(buf);
+  const kgmLike = ext === '.kgm' || ext === '.kgma' || kgmByMagic;
+  const ncmLike = !kgmLike && (ext === '.ncm' || Formats.isNcm(buf));
+  if (!kgmLike && !ncmLike) throw new Error('无法识别的加密格式（支持 kgm/kgma/ncm）');
+  if (kgmLike && !kgmByMagic) throw new Error('不是有效的 KGM/KGMA 文件（文件头不匹配）');
+
+  const worker = getDecryptWorker();
+  if (worker) {
+    if (kgmLike) {
+      const kt = await getKeyTable();
+      const msg = { type: 'kgm', buf: buf.buffer };
+      const transfers = [buf.buffer];
+      if (!workerHasKey) {
+        msg.keyTable = kt.buffer.slice(0); // 复制一份转移给 Worker 缓存，主线程保留原件
+        transfers.push(msg.keyTable);
+        workerHasKey = true;
+      }
+      const r = await runWorkerTask(worker, msg, transfers, onProgress);
+      return new Uint8Array(r.result);
+    }
+    const r = await runWorkerTask(worker, { type: 'ncm', buf: buf.buffer }, [buf.buffer], onProgress);
+    return new Uint8Array(r.result);
+  }
+  // 回退：主线程解密（循环里已分批让出事件循环，界面不会死，只是略慢）
+  if (kgmLike) return decrypt(buf, await getKeyTable(), onProgress);
+  return Formats.decryptNcm(buf, onProgress);
+}
+
+// ---------- ffmpeg 转码引擎（按需加载，多 CDN 自动切换） ----------
+async function pickCDN() {
+  if (!cdnBasePromise) {
+    cdnBasePromise = (async () => {
+      for (const base of CDN_BASES) {
+        try {
+          const res = await withTimeout(
+            fetch(base + '/' + FFMPEG_CORE_VER + '/package.json', { method: 'HEAD' }),
+            8000,
+            'CDN 探测'
+          );
+          if (res.ok) return base;
+        } catch (e) {
+          // 当前源不可达，试下一个
+        }
+      }
+      throw new Error('所有 CDN 均无法访问，请检查网络');
+    })();
+    cdnBasePromise.catch(() => { cdnBasePromise = null; });
+  }
+  return cdnBasePromise;
 }
 
 async function getFFmpeg() {
   if (ffmpeg) return ffmpeg;
   if (ffmpegLoading) return ffmpegLoading;
   ffmpegLoading = (async () => {
-    setStatus('正在加载 ffmpeg 转码引擎（约 25MB，来自 CDN，仅首次需要）…');
-    const [{ FFmpeg }, { toBlobURL }] = await Promise.all([
-      import(FFMPEG_FFMPEG_URL),
-      import(FFMPEG_UTIL_URL),
-    ]);
+    setStatus('正在选择可用的转码引擎源…');
+    const base = await pickCDN();
+    setStatus('正在加载 ffmpeg 转码引擎（约 25MB，仅转码时需要，源：' + base + '）…');
+    const [{ FFmpeg }, { toBlobURL }] = await withTimeout(
+      Promise.all([
+        import(base + '/' + FFMPEG_VER + '/dist/esm/index.js'),
+        import(base + '/' + FFMPEG_UTIL_VER + '/dist/esm/index.js'),
+      ]),
+      60000,
+      'ffmpeg 模块加载'
+    );
     const instance = new FFmpeg();
-    await instance.load({
-      coreURL: await toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
-      classWorkerURL: await toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js', 'text/javascript'),
-    });
+    const coreBase = base + '/' + FFMPEG_CORE_VER + '/dist/umd';
+    await withTimeout(
+      instance.load({
+        coreURL: await toBlobURL(coreBase + '/ffmpeg-core.js', 'text/javascript'),
+        wasmURL: await toBlobURL(coreBase + '/ffmpeg-core.wasm', 'application/wasm'),
+        classWorkerURL: await toBlobURL(base + '/' + FFMPEG_VER + '/dist/esm/worker.js', 'text/javascript'),
+      }),
+      120000,
+      'ffmpeg 内核加载'
+    );
     ffmpeg = instance;
+    setStatus('✅ 转码引擎已就绪。');
     return instance;
   })();
   try {
     return await ffmpegLoading;
   } catch (e) {
     ffmpegLoading = null;
-    throw new Error('ffmpeg 引擎加载失败（' + (e && e.message ? e.message : e) + '）。转码需要网络访问 CDN，解密还原原始格式则不受影响。');
+    throw new Error(
+      'ffmpeg 引擎加载失败：' + (e && e.message ? e.message : e) +
+      '。可直接选「原始格式」输出（只解密不转码，秒出，不受网络影响）。'
+    );
   }
 }
 
@@ -118,7 +224,8 @@ function triggerDownload(url, filename) {
 }
 
 async function ensureFormat(target, srcExt, audio) {
-  if (target === srcExt) return { ext: target, data: audio, transcoded: false };
+  // 「原始格式」或与源格式相同时，直接输出解密结果，不需要 ffmpeg
+  if (target === 'original' || target === srcExt) return { ext: srcExt, data: audio, transcoded: false };
   const inst = await getFFmpeg();
   const inName = 'in.' + srcExt;
   const outName = 'out.' + target;
@@ -154,41 +261,35 @@ async function processFile(file) {
   try {
     const buf = new Uint8Array(await file.arrayBuffer());
     const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
-    const isKgmFmt = ext === '.kgm' || ext === '.kgma';
 
-    statusNode.textContent = isKgmFmt ? '正在加载解密密钥表（12MB，首次较慢，之后走缓存）…' : '正在解密…';
-    await new Promise((r) => setTimeout(r, 0)); // 让状态文字有机会渲染
-    const audio = await decryptByFormat(buf, ext);
+    statusNode.textContent = '正在解密… 0%';
+    const audio = await decryptByFormat(buf, ext, (p) => {
+      statusNode.textContent = '正在解密… ' + Math.round(p * 100) + '%';
+    });
     const srcExt = sniffFormat(audio);
     const baseName = file.name.replace(/\.[^.]+$/, '');
 
     const fmt = formatSel.value;
-    if (fmt !== srcExt) {
-      statusNode.textContent = '正在转码（首次需联网加载 ffmpeg 引擎，约 25MB，请耐心等待）…';
-      await new Promise((r) => setTimeout(r, 0));
+    const needTranscode = fmt !== 'original' && fmt !== srcExt;
+    if (needTranscode) {
+      statusNode.textContent = '正在转码（首次需联网加载 ffmpeg 引擎，约 25MB）…';
     }
-    const outputs = [];
-    outputs.push(await ensureFormat(fmt, srcExt, audio));
+    const output = await ensureFormat(fmt, srcExt, audio);
 
-    metaNode.textContent = '已转换 → ' + baseName + '.' + fmt + '（源格式：' + srcExt.toUpperCase() + '）';
+    metaNode.textContent =
+      '已转换 → ' + baseName + '.' + output.ext +
+      '（源格式：' + srcExt.toUpperCase() + (output.transcoded ? '，已转码' : '，仅解密') + '）';
 
-    // 生成下载链接并自动触发下载（浏览器若拦截，仍可手动点击）
-    for (let i = 0; i < outputs.length; i++) {
-      const o = outputs[i];
-      const url = makeDownloadUrl(o.data, o.ext);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = baseName + '.' + o.ext;
-      a.className = 'dl-link';
-      a.textContent = '下载 ' + o.ext.toUpperCase();
-      linksNode.appendChild(a);
+    const url = makeDownloadUrl(output.data, output.ext);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = baseName + '.' + output.ext;
+    a.className = 'dl-link';
+    a.textContent = '下载 ' + output.ext.toUpperCase();
+    linksNode.appendChild(a);
 
-      triggerDownload(url, a.download);
-      setTimeout(() => URL.revokeObjectURL(url), 60000); // 60 秒后释放内存
-      if (outputs.length > 1 && i < outputs.length - 1) {
-        await new Promise((r) => setTimeout(r, 400));
-      }
-    }
+    triggerDownload(url, a.download);
+    setTimeout(() => URL.revokeObjectURL(url), 60000); // 60 秒后释放内存
 
     statusNode.textContent = '完成 ✅';
     statusNode.classList.add('ok');
@@ -242,6 +343,5 @@ syncBitrateVisibility();
 
 // ---------- 启动 ----------
 setStatus('就绪。拖入 .kgm/.kgma/.ncm 文件开始转换。');
-// 后台预加载酷狗密钥表和 ffmpeg 引擎，加速后续转换
+// 后台预加载酷狗密钥表（同源 12MB，很快）；ffmpeg 引擎改为转码时按需加载
 getKeyTable().catch(() => {});
-getFFmpeg().catch(() => {});

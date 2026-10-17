@@ -48,11 +48,13 @@ function isKgm(buf) {
 
 /**
  * 解密 KGMA / KGM 文件，返回还原后的音频数据（MP3 / FLAC / ...）。
+ * 每 4MB 让出一次事件循环并回报进度，避免大文件时界面假死。
  * @param {Uint8Array} buf 原始文件字节
  * @param {Uint8Array} keyTable 73,155,904 字节公钥表
- * @returns {Uint8Array} 还原后的音频数据
+ * @param {(progress: number) => void} [onProgress] 可选进度回调，0~1
+ * @returns {Promise<Uint8Array>} 还原后的音频数据
  */
-function decrypt(buf, keyTable) {
+async function decrypt(buf, keyTable, onProgress) {
   const ownKey = new Uint8Array(17);
   ownKey.set(buf.subarray(0x1c, 0x2c), 0); // 头部偏移 0x1c 的 16 字节 + 1 个零字节
 
@@ -65,7 +67,12 @@ function decrypt(buf, keyTable) {
     const med = ownKey[i % 17] ^ src[i];
     const msk = mend[i % 272] ^ keyTable[i >> 4];
     out[i] = (med ^ ((med & 0x0f) << 4)) ^ (msk ^ ((msk & 0x0f) << 4));
+    if ((i & 0x3fffff) === 0x3fffff) { // 每 4MB
+      if (onProgress) onProgress((i + 1) / audioLen);
+      await new Promise((r) => setTimeout(r, 0)); // 让出事件循环，界面不卡
+    }
   }
+  if (onProgress) onProgress(1);
   return out;
 }
 

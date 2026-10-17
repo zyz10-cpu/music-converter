@@ -129,12 +129,17 @@
     return box;
   }
 
-  function rc4Decrypt(audio, box) {
+  async function rc4Decrypt(audio, box, onProgress) {
     const out = new Uint8Array(audio.length);
     for (let i = 0; i < audio.length; i++) {
       const j = (i + 1) & 0xff;
       out[i] = audio[i] ^ box[(box[j] + box[(box[j] + j) & 0xff]) & 0xff];
+      if ((i & 0x3fffff) === 0x3fffff) { // 每 4MB
+        if (onProgress) onProgress((i + 1) / audio.length);
+        await new Promise((r) => setTimeout(r, 0)); // 让出事件循环，界面不卡
+      }
     }
+    if (onProgress) onProgress(1);
     return out;
   }
 
@@ -148,7 +153,7 @@
     return true;
   }
 
-  async function decryptNcm(buf) {
+  async function decryptNcm(buf, onProgress) {
     if (!isNcm(buf)) throw new Error('不是有效的 NCM 文件（文件头魔数不匹配）');
     let pos = 10; // 魔数(8) + gap(2)
     const keyLen = readU32(buf, pos); pos += 4;
@@ -192,7 +197,7 @@
     if (pos > buf.length) throw new Error('NCM 文件结构异常（cover 越界）');
 
     const audio = buf.subarray(pos);
-    return rc4Decrypt(audio, buildKeyBox(boxKey));
+    return rc4Decrypt(audio, buildKeyBox(boxKey), onProgress);
   }
 
   global.Formats = { isNcm, decryptNcm };

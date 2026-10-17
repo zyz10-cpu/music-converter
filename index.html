@@ -24,7 +24,8 @@
       <label class="field">
         <span>输出格式</span>
         <select id="format">
-          <option value="flac" selected>FLAC</option>
+          <option value="original" selected>原始格式（仅解密，最快）</option>
+          <option value="flac">FLAC</option>
           <option value="mp3">MP3</option>
           <option value="wav">WAV</option>
           <option value="aac">AAC</option>
@@ -41,7 +42,7 @@
     </section>
 
     <p class="hint">
-      提示：解密后自动转成所选格式。转 FLAC/WAV 不提升音质，转 MP3/AAC 为有损压缩。
+      提示：默认输出「原始格式」只解密不转码，速度最快、零音质损失；选 MP3/AAC 为有损压缩，转码时才需联网加载 ffmpeg 引擎。
     </p>
 
     <div id="status" class="status">正在初始化…</div>
