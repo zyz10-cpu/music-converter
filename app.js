@@ -2,9 +2,9 @@
 // 解密函数 isKgm/decrypt/sniffFormat 来自 kgm.js（通过 <script> 先加载，全局共享）
 
 const KEY_URL = './kugou_key.gz';
-const FFMPEG_FFMPEG_URL = 'https://registry.npmmirror.com/@ffmpeg/ffmpeg/0.12.10/files/dist/esm/index.js';
-const FFMPEG_UTIL_URL = 'https://registry.npmmirror.com/@ffmpeg/util/0.12.1/files/dist/esm/index.js';
-const FFMPEG_CORE_BASE = 'https://registry.npmmirror.com/@ffmpeg/core/0.12.6/files/dist/umd';
+const FFMPEG_FFMPEG_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
+const FFMPEG_UTIL_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js';
+const FFMPEG_CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
 
 const MIME = { mp3: 'audio/mpeg', flac: 'audio/flac', ogg: 'audio/ogg', wav: 'audio/wav', aac: 'audio/aac', m4a: 'audio/mp4' };
 
@@ -48,6 +48,9 @@ async function loadKeyTable() {
   const stream = new Blob([gzBytes]).stream().pipeThrough(new DecompressionStream('gzip'));
   const buf = await new Response(stream).arrayBuffer();
   keyTable = new Uint8Array(buf);
+  if (keyTable.length !== 73155904) {
+    throw new Error('密钥表大小异常（' + keyTable.length + '），文件可能损坏');
+  }
   setStatus('✅ 密钥表已就绪，可以拖入文件开始转换。');
   return keyTable;
 }
@@ -55,12 +58,14 @@ async function loadKeyTable() {
 let keyTablePromise = null;
 async function getKeyTable() {
   if (keyTable) return keyTable;
-  if (!keyTablePromise) keyTablePromise = loadKeyTable().then(() => keyTable);
+  if (!keyTablePromise) {
+    keyTablePromise = loadKeyTable().then(() => keyTable).catch((e) => { keyTablePromise = null; throw e; });
+  }
   return keyTablePromise;
 }
 
 async function decryptByFormat(buf, ext) {
-  if (ext === '.kgm' || ext === '.kgma' || ext === '.vpr') {
+  if (ext === '.kgm' || ext === '.kgma') {
     const kt = await getKeyTable();
     if (!isKgm(buf)) throw new Error('不是有效的 KGM/KGMA 文件（文件头不匹配）');
     return decrypt(buf, kt);
@@ -85,7 +90,7 @@ async function getFFmpeg() {
     await instance.load({
       coreURL: await toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.js`, 'text/javascript'),
       wasmURL: await toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
-      classWorkerURL: await toBlobURL('https://registry.npmmirror.com/@ffmpeg/ffmpeg/0.12.10/files/dist/esm/worker.js', 'text/javascript'),
+      classWorkerURL: await toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js', 'text/javascript'),
     });
     ffmpeg = instance;
     return instance;
@@ -149,7 +154,7 @@ async function processFile(file) {
   try {
     const buf = new Uint8Array(await file.arrayBuffer());
     const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
-    const isKgmFmt = ext === '.kgm' || ext === '.kgma' || ext === '.vpr';
+    const isKgmFmt = ext === '.kgm' || ext === '.kgma';
 
     statusNode.textContent = isKgmFmt ? '正在加载解密密钥表（12MB，首次较慢，之后走缓存）…' : '正在解密…';
     await new Promise((r) => setTimeout(r, 0)); // 让状态文字有机会渲染
@@ -179,6 +184,7 @@ async function processFile(file) {
       linksNode.appendChild(a);
 
       triggerDownload(url, a.download);
+      setTimeout(() => URL.revokeObjectURL(url), 60000); // 60 秒后释放内存
       if (outputs.length > 1 && i < outputs.length - 1) {
         await new Promise((r) => setTimeout(r, 400));
       }

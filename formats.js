@@ -183,9 +183,13 @@
     }
     const boxKey = deKey.subarray(17);
 
-    const modLen = readU32(buf, pos); pos += 4 + modLen;
+    const modLen = readU32(buf, pos);
+    pos += 4 + modLen;
     pos += 9; // crc32 + image version
-    const coverLen = readU32(buf, pos); pos += 4 + coverLen;
+    if (pos + 4 > buf.length) throw new Error('NCM 文件结构异常（modifyData 越界）');
+    const coverLen = readU32(buf, pos);
+    pos += 4 + coverLen;
+    if (pos > buf.length) throw new Error('NCM 文件结构异常（cover 越界）');
 
     const audio = buf.subarray(pos);
     return rc4Decrypt(audio, buildKeyBox(boxKey));
