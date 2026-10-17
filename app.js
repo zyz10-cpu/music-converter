@@ -2,9 +2,9 @@
 // 解密函数 isKgm/decrypt/sniffFormat 来自 kgm.js（通过 <script> 先加载，全局共享）
 
 const KEY_URL = './kugou_key.gz';
-const FFMPEG_FFMPEG_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
-const FFMPEG_UTIL_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js';
-const FFMPEG_CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+const FFMPEG_FFMPEG_URL = 'https://registry.npmmirror.com/@ffmpeg/ffmpeg/0.12.10/files/dist/esm/index.js';
+const FFMPEG_UTIL_URL = 'https://registry.npmmirror.com/@ffmpeg/util/0.12.1/files/dist/esm/index.js';
+const FFMPEG_CORE_BASE = 'https://registry.npmmirror.com/@ffmpeg/core/0.12.6/files/dist/umd';
 
 const MIME = { mp3: 'audio/mpeg', flac: 'audio/flac', ogg: 'audio/ogg', wav: 'audio/wav', aac: 'audio/aac', m4a: 'audio/mp4' };
 
@@ -85,7 +85,7 @@ async function getFFmpeg() {
     await instance.load({
       coreURL: await toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.js`, 'text/javascript'),
       wasmURL: await toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
-      classWorkerURL: await toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js', 'text/javascript'),
+      classWorkerURL: await toBlobURL('https://registry.npmmirror.com/@ffmpeg/ffmpeg/0.12.10/files/dist/esm/worker.js', 'text/javascript'),
     });
     ffmpeg = instance;
     return instance;
@@ -236,5 +236,6 @@ syncBitrateVisibility();
 
 // ---------- 启动 ----------
 setStatus('就绪。拖入 .kgm/.kgma/.ncm 文件开始转换。');
-// 后台预加载酷狗解密密钥表，加速后续酷狗文件转换
+// 后台预加载酷狗密钥表和 ffmpeg 引擎，加速后续转换
 getKeyTable().catch(() => {});
+getFFmpeg().catch(() => {});
