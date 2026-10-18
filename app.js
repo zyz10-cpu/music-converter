@@ -224,6 +224,8 @@ function createCoreClient() {
     const err = new Error('ffmpeg Worker 异常：' + (e.message || '未知错误'));
     for (const p of client.pending.values()) p.reject(err);
     client.pending.clear();
+    // Worker 已死：清掉缓存的引擎实例，下一个文件自动重建，避免永远卡住
+    if (ffmpeg === client) { ffmpeg = null; ffmpegLoading = null; }
   };
   return client;
 }
@@ -250,6 +252,7 @@ async function getFFmpeg() {
       setStatus('✅ 转码引擎已就绪（内置）。');
       return client;
     } catch (e) {
+      try { client.worker.terminate(); } catch (_) {}
       errors.push('内置引擎：' + (e && e.message ? e.message : e));
     }
     // 方案二：CDN（importScripts 跨域直取核心库；wasm 地址按核心库路径推导，由引擎内部下载）
@@ -263,6 +266,7 @@ async function getFFmpeg() {
         setStatus('✅ 转码引擎已就绪（' + cdn.name + '）。');
         return client;
       } catch (e) {
+        try { client.worker.terminate(); } catch (_) {}
         errors.push(cdn.name + '：' + (e && e.message ? e.message : e));
       }
     }
@@ -318,6 +322,7 @@ async function ensureFormat(target, srcExt, audio, onProgress) {
   else if (target === 'wav') args.push('-c:a', 'pcm_s16le');
   else if (target === 'aac') args.push('-c:a', 'aac', '-b:a', bitrateSel.value + 'k');
   args.push(outName);
+  inst.logs.length = 0; // 清掉历史日志，避免上一个文件的 av3a 记录误伤本次判断
   const ret = await inst.call('EXEC', { args, timeout: -1 });
   if (ret !== 0) {
     const logText = (inst.logs || []).join('\n');
@@ -411,7 +416,7 @@ async function processFile(file) {
     linksNode.appendChild(a);
 
     triggerDownload(url, a.download);
-    setTimeout(() => URL.revokeObjectURL(url), 60000); // 60 秒后释放内存
+    setTimeout(() => URL.revokeObjectURL(url), 300000); // 5 分钟后释放内存（给手动下载留足时间）
 
     statusNode.textContent = '完成 ✅';
     statusNode.classList.add('ok');
