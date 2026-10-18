@@ -3,21 +3,21 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>KGMA / KGM 音频转换器</title>
+  <title>音频转换器（KGMA / KGM / NCM 解密 + 格式互转）</title>
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
   <main class="app">
     <header>
-      <h1>🎵 加密音乐转换器</h1>
-      <p class="subtitle">本地解密 · 文件不出浏览器 · 支持酷狗 kgm/kgma · 网易云 ncm</p>
+      <h1>🎵 音频转换器</h1>
+      <p class="subtitle">本地处理 · 文件不出浏览器 · 解密 kgm/kgma/ncm · 支持 FLAC/MP3/WAV/AAC/M4A/OGG 互转</p>
     </header>
 
     <div id="dropZone" class="drop-zone" tabindex="0">
       <div class="drop-icon">📁</div>
-      <p>拖拽酷狗 .kgm/.kgma 或网易云 .ncm 文件到这里</p>
+      <p>拖入加密文件（.kgm/.kgma/.ncm）或普通音频（FLAC/MP3/WAV/AAC/M4A/OGG）</p>
       <button id="pickBtn" class="btn" type="button">选择文件</button>
-      <input type="file" id="fileInput" accept=".kgm,.kgma,.ncm" multiple hidden />
+      <input type="file" id="fileInput" accept=".kgm,.kgma,.ncm,.flac,.mp3,.wav,.aac,.m4a,.ogg" multiple hidden />
     </div>
 
     <section class="options">

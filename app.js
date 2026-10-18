@@ -28,6 +28,9 @@ const PKG_CORE = ['@ffmpeg/core', '0.12.6'];
 
 const MIME = { mp3: 'audio/mpeg', flac: 'audio/flac', ogg: 'audio/ogg', wav: 'audio/wav', aac: 'audio/aac', m4a: 'audio/mp4' };
 
+// 无加密普通音频格式：直接读取，跳过解密，进入转码/直通流程
+const PLAIN_EXTS = { '.flac': 'flac', '.mp3': 'mp3', '.wav': 'wav', '.aac': 'aac', '.m4a': 'm4a', '.ogg': 'ogg' };
+
 const statusEl = document.getElementById('status');
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
@@ -133,7 +136,7 @@ async function decryptByFormat(buf, ext, onProgress) {
   const kgmByMagic = isKgm(buf);
   const kgmLike = ext === '.kgm' || ext === '.kgma' || kgmByMagic;
   const ncmLike = !kgmLike && (ext === '.ncm' || Formats.isNcm(buf));
-  if (!kgmLike && !ncmLike) throw new Error('无法识别的加密格式（支持 kgm/kgma/ncm）');
+  if (!kgmLike && !ncmLike) throw new Error('无法识别的加密格式（加密支持 kgm/kgma/ncm；普通音频 FLAC/MP3/WAV/AAC/M4A/OGG 可直接拖入互转）');
   if (kgmLike && !kgmByMagic) throw new Error('不是有效的 KGM/KGMA 文件（文件头不匹配）');
 
   const worker = getDecryptWorker();
@@ -354,11 +357,24 @@ async function processFile(file) {
     const buf = new Uint8Array(await file.arrayBuffer());
     const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
 
-    statusNode.textContent = '正在解密… 0%';
-    const audio = await decryptByFormat(buf, ext, (p) => {
-      statusNode.textContent = '正在解密… ' + Math.round(p * 100) + '%';
-    });
-    const srcExt = sniffFormat(audio);
+    let audio;
+    let srcExt;
+    let wasEncrypted;
+    const plainExt = PLAIN_EXTS[ext];
+    if (plainExt) {
+      // 普通音频：不解密，直接进转码/直通
+      statusNode.textContent = '正在读取…';
+      audio = buf;
+      srcExt = plainExt;
+      wasEncrypted = false;
+    } else {
+      statusNode.textContent = '正在解密… 0%';
+      audio = await decryptByFormat(buf, ext, (p) => {
+        statusNode.textContent = '正在解密… ' + Math.round(p * 100) + '%';
+      });
+      srcExt = sniffFormat(audio);
+      wasEncrypted = true;
+    }
     const baseName = file.name.replace(/\.[^.]+$/, '');
 
     const fmt = formatSel.value;
@@ -380,9 +396,10 @@ async function processFile(file) {
       statusNode.textContent = '正在转码… ' + Math.round(p * 100) + '%';
     });
 
+    const action = output.transcoded ? '已转码' : wasEncrypted ? '仅解密' : '格式相同，直接输出';
     metaNode.textContent =
       '已转换 → ' + baseName + '.' + output.ext +
-      '（源格式：' + srcExt.toUpperCase() + (output.transcoded ? '，已转码' : '，仅解密') + '）' +
+      '（源格式：' + srcExt.toUpperCase() + '，' + action + '）' +
       (audioVivid ? ' ⚠️ 菁彩声格式，仅网易云客户端可播放' : '');
 
     const url = makeDownloadUrl(output.data, output.ext);
@@ -451,6 +468,6 @@ formatSel.addEventListener('change', () => {
 syncBitrateVisibility();
 
 // ---------- 启动 ----------
-setStatus('就绪。拖入 .kgm/.kgma/.ncm 文件开始转换。');
+setStatus('就绪。拖入 .kgm/.kgma/.ncm 加密文件或 FLAC/MP3/WAV 等普通音频开始转换。');
 // 后台预加载酷狗密钥表（同源 12MB，很快）；ffmpeg 引擎改为转码时按需加载
 getKeyTable().catch(() => {});
